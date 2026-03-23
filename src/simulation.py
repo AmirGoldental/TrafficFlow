@@ -169,7 +169,7 @@ class Simulation:
         steps = int(duration / self.dt)
         for i in range(steps):
             self.step()
-            if i % (10 / self.dt) == 0:
+            if i % max(1, int(10 / self.dt)) == 0:
                 s = self.stats[-1] if self.stats else {}
                 print(
                     f"  t={self.time:.1f}s  vehicles={s.get('active_vehicles', 0)}"

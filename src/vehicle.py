@@ -80,7 +80,7 @@ class Vehicle:
             self.active = False
             return
 
-        v0 = min(IDM_V0, seg.speed_limit)
+        v0 = min(IDM_V0, seg.speed_limit) or IDM_V0  # fallback if speed_limit is 0
         dist_to_end = seg.length - self.pos
 
         # Check traffic light at end of segment

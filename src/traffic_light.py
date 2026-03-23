@@ -69,9 +69,17 @@ class TrafficLight:
             self._phase_segs[0] = self._phase_segs[1]
             self._phase_segs[1] = set()
 
-        self._current_phase = 0
-        self._elapsed = 0.0
-        self._state = "green"      # "green" | "yellow"
+        # Apply offset to stagger signal timing across intersections
+        phase_duration = GREEN_DURATION + YELLOW_DURATION
+        offset_in_cycle = self.offset % CYCLE_LENGTH
+        self._current_phase = int(offset_in_cycle // phase_duration) % len(self._phase_segs)
+        elapsed_in_phase = offset_in_cycle % phase_duration
+        if elapsed_in_phase < GREEN_DURATION:
+            self._state = "green"
+            self._elapsed = elapsed_in_phase
+        else:
+            self._state = "yellow"
+            self._elapsed = elapsed_in_phase - GREEN_DURATION
 
     # ------------------------------------------------------------------
     def step(self, dt: float):

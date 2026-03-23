@@ -398,6 +398,23 @@ function setupClickHandlers() {
 
 // ------------------------------------------------------------------ inspect
 
+function appendStatRows(container, rows) {
+    for (const [label, value, color] of rows) {
+        const row = document.createElement("div");
+        row.className = "stat-row";
+        const labelEl = document.createElement("span");
+        labelEl.className = "stat-label";
+        labelEl.textContent = label;
+        const valueEl = document.createElement("span");
+        valueEl.className = "stat-value";
+        valueEl.textContent = value;
+        if (color) valueEl.style.color = color;
+        row.appendChild(labelEl);
+        row.appendChild(valueEl);
+        container.appendChild(row);
+    }
+}
+
 function onInspectResult(msg) {
     const panel = document.getElementById("inspect-panel");
     const title = document.getElementById("inspect-title");
@@ -408,24 +425,27 @@ function onInspectResult(msg) {
     if (msg.target === "vehicle") {
         const d = msg.data;
         title.textContent = `Vehicle #${d.vid}`;
-        content.innerHTML = `
-            <div class="stat-row"><span class="stat-label">Speed</span><span class="stat-value">${d.speed_kmh} km/h</span></div>
-            <div class="stat-row"><span class="stat-label">Acceleration</span><span class="stat-value">${d.accel} m/s²</span></div>
-            <div class="stat-row"><span class="stat-label">Route</span><span class="stat-value">${d.route_progress}</span></div>
-            <div class="stat-row"><span class="stat-label">Distance</span><span class="stat-value">${d.distance_total_m} m</span></div>
-            <div class="stat-row"><span class="stat-label">Road</span><span class="stat-value">${d.current_road || "—"}</span></div>
-            <div class="stat-row"><span class="stat-label">Position</span><span class="stat-value">${d.segment_pos}</span></div>
-        `;
+        content.innerHTML = "";
+        appendStatRows(content, [
+            ["Speed", `${d.speed_kmh} km/h`],
+            ["Acceleration", `${d.accel} m/s\u00B2`],
+            ["Route", d.route_progress],
+            ["Distance", `${d.distance_total_m} m`],
+            ["Road", d.current_road || "\u2014"],
+            ["Position", d.segment_pos],
+        ]);
     } else if (msg.target === "signal") {
         const d = msg.data;
+        const stateColor = d.state === "green" ? "#00ff88" : d.state === "yellow" ? "#ffdd00" : "#ff3333";
         title.textContent = `Signal #${d.node_id}`;
-        content.innerHTML = `
-            <div class="stat-row"><span class="stat-label">State</span><span class="stat-value" style="color:${d.state === 'green' ? '#00ff88' : d.state === 'yellow' ? '#ffdd00' : '#ff3333'}">${d.state}</span></div>
-            <div class="stat-row"><span class="stat-label">Phase</span><span class="stat-value">${d.current_phase}</span></div>
-            <div class="stat-row"><span class="stat-label">Cluster nodes</span><span class="stat-value">${d.controller_nodes?.length || 1}</span></div>
-            <div class="stat-row"><span class="stat-label">N-S edges</span><span class="stat-value">${d.phase_0_edges}</span></div>
-            <div class="stat-row"><span class="stat-label">E-W edges</span><span class="stat-value">${d.phase_1_edges}</span></div>
-            <div class="stat-row"><span class="stat-label">Roads</span><span class="stat-value">${(d.incoming_roads || []).join(", ") || "—"}</span></div>
-        `;
+        content.innerHTML = "";
+        appendStatRows(content, [
+            ["State", d.state, stateColor],
+            ["Phase", d.current_phase],
+            ["Cluster nodes", d.controller_nodes?.length || 1],
+            ["N-S edges", d.phase_0_edges],
+            ["E-W edges", d.phase_1_edges],
+            ["Roads", (d.incoming_roads || []).join(", ") || "\u2014"],
+        ]);
     }
 }
