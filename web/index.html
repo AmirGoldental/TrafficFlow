@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrafficFlow — Boston Traffic Simulation</title>
+
+    <!-- MapLibre GL JS (free, no API key) -->
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.5.0/dist/maplibre-gl.css">
+    <script src="https://unpkg.com/maplibre-gl@5.5.0/dist/maplibre-gl.js"></script>
+
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Loading overlay -->
+    <div id="loading-overlay">
+        <div class="loader-content">
+            <div class="spinner"></div>
+            <p>Loading simulation...</p>
+        </div>
+    </div>
+
+    <!-- Map -->
+    <div id="map"></div>
+
+    <!-- Controls bar -->
+    <div id="controls">
+        <button id="btn-play" title="Play/Pause">
+            <span id="play-icon">▶</span>
+        </button>
+        <button id="btn-reset" title="Reset">⟳</button>
+
+        <div class="control-group">
+            <label for="speed-slider">Speed</label>
+            <input type="range" id="speed-slider" min="0.25" max="5" step="0.25" value="1">
+            <span id="speed-label">1×</span>
+        </div>
+
+        <div class="control-group time-display">
+            <span id="sim-time">t = 0s</span>
+        </div>
+    </div>
+
+    <!-- Stats sidebar -->
+    <div id="sidebar">
+        <h2>TrafficFlow</h2>
+        <div class="stat-section">
+            <h3>Simulation</h3>
+            <div class="stat-row">
+                <span class="stat-label">Time</span>
+                <span class="stat-value" id="stat-time">0s</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Vehicles</span>
+                <span class="stat-value" id="stat-vehicles">0</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Avg Speed</span>
+                <span class="stat-value" id="stat-speed">0 km/h</span>
+            </div>
+        </div>
+
+        <div class="stat-section">
+            <h3>Speed History</h3>
+            <canvas id="sparkline" width="220" height="60"></canvas>
+        </div>
+
+        <!-- Inspect panel (appears on click) -->
+        <div id="inspect-panel" class="stat-section" style="display:none;">
+            <h3 id="inspect-title">Details</h3>
+            <div id="inspect-content"></div>
+        </div>
+
+        <div class="stat-section legend">
+            <h3>Legend</h3>
+            <div class="legend-item">
+                <span class="legend-dot" style="background:#00ff88"></span> Vehicle (fast)
+            </div>
+            <div class="legend-item">
+                <span class="legend-dot" style="background:#ffdd00"></span> Vehicle (slow)
+            </div>
+            <div class="legend-item">
+                <span class="legend-dot" style="background:#ff3333"></span> Vehicle (stopped)
+            </div>
+            <div class="legend-line" style="border-color:#00ff88">── Green phase</div>
+            <div class="legend-line" style="border-color:#ff3333">── Red phase</div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
