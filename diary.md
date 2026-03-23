@@ -2,82 +2,64 @@
 
 ## 2026-03-23 — Session 1: Project Bootstrap
 
-### Map Loading & Data
-- Set up Python project with venv, osmnx, networkx, matplotlib
-- Built `src/map_loader.py`: loads Boston road network from OSM via osmnx, caches to disk
-- Integrated traffic signal data from two sources:
-  - Analyze Boston open data (CSV with lat/lon)
-  - OSM `highway=traffic_signals` nodes
-  - Deduplicated using scipy KDTree (30m radius)
-- Defined corridor system in `CORRIDORS` dict — started with full Boston, then narrowed
+Amir asked me to build a traffic flow simulation for Boston from scratch — no existing simulators. He wanted to start with the map, find traffic lights, and simulate flow.
 
-### Simulation Engine
-- `src/network.py`: RoadNetwork wrapping osmnx MultiDiGraph into RoadSegment + Intersection dataclasses
-- `src/vehicle.py`: IDM (Intelligent Driver Model) for longitudinal car-following
-- `src/simulation.py`: Main loop — per-tick: step lights, find leaders, step vehicles, collect stats
-- `src/traffic_light.py`: Two-phase N-S/E-W signal controller with bearing-based phase assignment
-  - Added signal clustering (40m radius) so nearby OSM nodes share one controller
+I decided to use osmnx to pull the road network from OpenStreetMap, since it gives us a graph we can simulate on directly. For traffic signals, I pulled from two sources — Analyze Boston's open data (a CSV with 848 signals) and OSM's own `highway=traffic_signals` tags. I used scipy's KDTree to deduplicate them within 30m, which gave us better coverage than either source alone.
 
-### Corridor Focus
-- Started with full Boston — bbox too large for Overpass, signal coverage poor
-- Narrowed to Warren St corridor (Roxbury): ~2.1 km, 612 nodes, 1290 edges, 52 signals
-- Generated GIF animation with matplotlib
+For the simulation itself, I chose the Intelligent Driver Model (IDM) — it's the standard microscopic car-following model in traffic research and only needs a few parameters. Each vehicle follows a pre-computed shortest path and reacts to the vehicle ahead and to red lights.
 
-### Matplotlib Visualizer
-- `src/visualizer.py`: dark-themed matplotlib animation
-- Directional signal indicators (short colored lines per approach)
-- Vehicle dots colored by speed
-- Saved as GIF
+I started with the full city of Boston, but the bbox was too large for Overpass API and the signal coverage was sparse. Amir suggested focusing on a specific corridor. We initially looked at a few options and he picked **Warren St** in Roxbury — about 2.1 km, 612 nodes, 1290 edges, 52 traffic signals. Dense enough to be interesting.
+
+Built a matplotlib visualizer with a dark theme, directional signal indicators, and speed-colored vehicle dots. Generated a GIF to verify everything worked. It did, but Amir noted three problems:
+1. Vehicles were stacking on top of each other at red lights
+2. Couldn't tell which phase was green from the visualization
+3. Some intersections had multiple signal nodes that should act as one
+
+I fixed the signal clustering (40m radius merging nearby nodes into one controller), added directional phase indicators, and improved the vehicle gap handling.
 
 ---
 
-## 2026-03-23 — Session 2: Web Dashboard
+## 2026-03-23 — Session 2: Web Dashboard & Vehicle Polygons
 
-### Architecture Decision
-- Replaced matplotlib with interactive web dashboard (Option A from proposal)
-- Stack: FastAPI + WebSocket backend, MapLibre GL JS frontend (free, no API key)
-- Used a Plan agent to design file structure, WebSocket protocol, layer strategy
+Amir wanted better visualization and interactivity. I proposed three options: enhanced matplotlib, a full web dashboard, or a hybrid. He went with the web dashboard.
 
-### Backend (`server.py`)
-- FastAPI with lifespan event for graph loading
-- WebSocket endpoint streams simulation state at 20fps
-- Control messages: play/pause/speed/reset
-- Inspect messages: click vehicle or signal for details
+I used a **Plan agent** to design the architecture before writing any code — it read all the source files and produced a detailed plan for file structure, WebSocket protocol, and MapLibre layer strategy. This was valuable because it let me write all the files without stopping to re-read code mid-implementation.
 
-### Serialization (`src/state_serializer.py`)
-- `serialize_network()`: static road GeoJSON + signal indicators (sent once)
-- `serialize_frame()`: per-tick vehicle positions + signal states + stats
-- Vehicle positions interpolated from segment u→v nodes
+**Stack decision:** FastAPI + WebSocket for the backend (streams simulation state at 20fps), MapLibre GL JS for the frontend (free, no API key needed — I used CARTO dark basemap tiles). The simulation runs server-side; the browser just renders.
 
-### Frontend (`web/`)
-- `index.html`: MapLibre canvas + controls bar + stats sidebar
-- `js/app.js`: WebSocket connection, layer management, click handlers, sparkline
-- `style.css`: Dark theme matching the simulation aesthetic
-- CARTO dark basemap tiles (no API key needed)
-- Data-driven styling: vehicle color by speed, signal indicators by phase
+The frontend has three zones: the map canvas, a controls bar (play/pause, speed slider, reset), and a stats sidebar (vehicle count, avg speed, speed history sparkline). You can click on vehicles or signal indicators to inspect them.
 
-### Vehicle Visualization Upgrade
-- Changed from circle dots to 5-sided arrow polygons (`|=>`)
-- 7m long, 2m wide, computed as lon/lat polygons per frame
-- Lane assignment: vehicles pick a lane, offset laterally by 3.5m per lane
-- Leaders matched per-lane so different lanes are independent
-- 3m minimum bumper-to-bumper gap (IDM s0)
+Then Amir asked for proper vehicle shapes: 7m long, 5-sided arrow polygons (`|=>`), with 3m bumper-to-bumper gaps and lane separation on multi-lane roads. This meant:
+- Computing arrow polygon vertices in lon/lat coordinates per frame (using bearing from segment direction)
+- Adding lane assignment to vehicles (lateral offset by 3.5m per lane)
+- Matching leaders per-lane so cars in different lanes don't block each other
+- Switching the frontend from circle markers to fill polygons
 
-### Bug Review (Review Agent Loop 1)
-Ran a dedicated reviewer agent — found 10 bugs:
+### The Reviewer Agent Experiment
 
-**Critical (fixed):**
-1. Leader-finding sort order was backwards (found farthest vehicle, not nearest) — IDM was fundamentally broken
-2. Shared `_network` not cleared on reset — stale vehicle IDs corrupted segment lists
+After getting everything working visually, I ran a **dedicated reviewer agent** to find bugs. This turned out to be one of the most impactful decisions in the project. The reviewer found 10 bugs, including a **critical one I never would have caught**: the leader-finding sort was backwards. Vehicles were sorted descending by position, but the scan loop found the first match scanning from the top — meaning it found the **farthest** vehicle ahead, not the nearest. The IDM was computing gaps to the wrong car. The hard clamp I'd added was the only thing preventing total chaos.
 
-**Medium (fixed):**
-3. Hard clamp used stale leader position after vehicle transitioned to new segment
-4. Frontend accessed MapLibre private API (`src._data`) for signal color updates
-5. WebSocket reconnection created duplicate MapLibre layers/sources
-6. `list.remove()` could crash on corrupted segment vehicle lists
+The reviewer also found that resetting the simulation didn't clear stale vehicle IDs from the shared network segments, causing ghost vehicles to corrupt leader-finding after reset.
 
-**Low (fixed):**
-7. Stats list grew unbounded (memory leak) — capped at 500
-8. All signal edges showed yellow during clearance (should only be previously-green phase)
-9. Indicator length math used approximate single-factor degree conversion
-10. Missing `travel_time` edge attribute could crash pathfinding — added KeyError catch
+Amir asked if I could have found these bugs myself. Honestly: probably not as well. The sort order bug was inherited from the original code and I never questioned it because I was focused on adding new features. A fresh agent with a "find bugs" prompt reads adversarially rather than confirming what it expects to see.
+
+---
+
+## 2026-03-23/24 — Review Loops 2-5: Systematic Bug Hunting
+
+Amir asked me to run review loops until clean, committing after each one. Here's how it went:
+
+**Loop 2** (7 bugs, 1 critical): The big finding was that multiple WebSocket connections shared the same `_network` object — a browser refresh would corrupt the simulation for everyone. Fixed by allowing only one active simulation at a time and kicking the previous connection. Also found that vehicle overflow past very short segments caused phantom red-light braking (the vehicle thought it was past the end of a segment and saw a "red light" that didn't exist). Fixed with a while loop for multi-segment transitions.
+
+**Loop 3** (4 bugs, 1 medium): The traffic light `offset` parameter was computed and stored but never actually applied — all intersections were cycling in perfect lockstep. This made the simulation unrealistically uniform. Fixed by initializing phase and elapsed time from the offset. Also found a potential XSS issue — the inspect panel used `innerHTML` with unsanitized OSM road names. Switched to DOM-based text content.
+
+**Loop 4** (3 bugs, 1 medium): Click handlers were being registered on every WebSocket reconnect, causing N inspect requests per click after N reconnects. Fixed by only registering handlers once. Also fixed the speed history sparkline not clearing on reconnect.
+
+**Loop 5**: **Clean.** No bugs found. The reviewer confirmed all patterns are correct.
+
+### Totals across all review loops
+- **24 bugs found and fixed** (3 critical, 5 medium, 16 low)
+- **5 review loops** to reach a clean state
+- Each loop got progressively cleaner: 10 → 7 → 4 → 3 → 0
+
+The key insight: a separate review agent with a bug-hunting prompt finds things the author agent won't. Worth making this a standard step after any non-trivial implementation.
