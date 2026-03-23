@@ -77,6 +77,8 @@ class Simulation:
             if seg is None:
                 continue
             v.lane = self.rng.randint(0, seg.lanes - 1)
+            # Offset spawn to avoid overlapping existing vehicles at pos=0
+            v.pos = self.rng.uniform(0, min(seg.length * 0.5, 20.0))
             seg.vehicles.append(vid)
             self.vehicles[vid] = v
             return v
@@ -130,7 +132,7 @@ class Simulation:
             v.step(self.dt, leader_gap, leader_speed)
 
             # Hard clamp: never overlap with leader (only if still on same segment)
-            if leader_pos is not None and v.current_segment is old_seg:
+            if leader_pos is not None and v.current_segment == old_seg:
                 max_pos = leader_pos - 7.0 - 0.5  # vehicle length + min buffer
                 if v.pos > max_pos:
                     v.pos = max(max_pos, 0.0)

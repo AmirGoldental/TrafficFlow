@@ -37,6 +37,8 @@ _network: RoadNetwork = None
 _network_json: dict = None
 _corridor_name: str = "warren_st"
 _num_vehicles: int = None
+_active_sim_lock = None  # asyncio.Lock, created at startup
+_active_ws = None        # track the single active WebSocket
 
 
 @asynccontextmanager
@@ -53,6 +55,8 @@ async def lifespan(app: FastAPI):
           f"{sum(1 for i in _network.intersections.values() if i.is_signal)} signals",
           flush=True)
     print(f"Default vehicles: {_num_vehicles}", flush=True)
+    global _active_sim_lock
+    _active_sim_lock = asyncio.Lock()
     yield
 
 
@@ -72,7 +76,16 @@ async def index():
 
 @app.websocket("/ws/simulation")
 async def simulation_ws(ws: WebSocket):
+    global _active_ws
     await ws.accept()
+
+    # Only one simulation at a time — kick previous connection
+    if _active_ws is not None:
+        try:
+            await _active_ws.close(1000, "replaced by new connection")
+        except Exception:
+            pass
+    _active_ws = ws
 
     # Clear any stale vehicle IDs from shared network segments
     for seg in _network.segments.values():
@@ -124,7 +137,9 @@ async def simulation_ws(ws: WebSocket):
                 elif action == "speed":
                     speed_mult = max(0.25, min(10.0, float(msg.get("value", 1.0))))
                 elif action == "reset":
-                    # Clear stale vehicle IDs from shared network segments
+                    # Pause loop, clear segments, create new sim, resume
+                    paused = True
+                    await asyncio.sleep(0.1)  # let sim_loop reach its pause point
                     for seg in _network.segments.values():
                         seg.vehicles.clear()
                     sim = Simulation(_network, num_vehicles=_num_vehicles)
@@ -147,6 +162,8 @@ async def simulation_ws(ws: WebSocket):
         print(f"WebSocket error: {e}")
     finally:
         loop_task.cancel()
+        if _active_ws is ws:
+            _active_ws = None
 
 
 # ------------------------------------------------------------------ main

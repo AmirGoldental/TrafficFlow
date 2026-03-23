@@ -197,7 +197,7 @@ def animate(sim: "Simulation", duration: float = 120.0, interval_ms: int = 100,
                 colors.append("#f5a623")
             elif light.is_green(eid):
                 colors.append("#00ff88")
-            elif light.state == "yellow":
+            elif light.state == "yellow" and light.phase_for_edge(eid) == light.current_phase:
                 colors.append("#ffdd00")
             else:
                 colors.append("#ff3333")

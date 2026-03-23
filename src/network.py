@@ -112,10 +112,13 @@ class RoadNetwork:
 
     def get_segment(self, u: int, v: int) -> Optional[RoadSegment]:
         """Return the first segment from u to v (any key)."""
-        for key in self.G[u][v]:
-            eid = (u, v, key)
-            if eid in self.segments:
-                return self.segments[eid]
+        try:
+            for key in self.G[u][v]:
+                eid = (u, v, key)
+                if eid in self.segments:
+                    return self.segments[eid]
+        except KeyError:
+            pass
         return None
 
     def successors(self, node_id: int) -> List[int]:

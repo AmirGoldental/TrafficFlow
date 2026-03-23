@@ -98,8 +98,8 @@ class Vehicle:
         self.pos += dx
         self.distance_total += dx
 
-        # Advance to next segment if past the end
-        if self.pos >= seg.length:
+        # Advance to next segment(s) if past the end — loop handles very short segments
+        while self.pos >= seg.length:
             overflow = self.pos - seg.length
             try:
                 seg.vehicles.remove(self.vid)
@@ -115,6 +115,7 @@ class Vehicle:
             next_seg.vehicles.append(self.vid)
             # Keep current lane, clamped to new segment's lane count
             self.lane = min(self.lane, next_seg.lanes - 1)
+            seg = next_seg
 
     # ---------------------------------------------------------------
     def _red_light_gap(self, seg, dist_to_end: float) -> Optional[float]:
