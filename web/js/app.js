@@ -118,6 +118,9 @@ function onNetwork(msg) {
     // Store indicator data for per-frame color updates
     indicatorGeoJSON = msg.indicators;
 
+    // Clear stale speed history from previous session
+    speedHistory = [];
+
     // Add road network layer
     map.addSource("roads", {
         type: "geojson",
@@ -194,8 +197,10 @@ function onNetwork(msg) {
         map.fitBounds(bounds, { padding: 60 });
     }
 
-    // Click interactions
-    setupClickHandlers();
+    // Click interactions (only register once)
+    if (!networkLoaded) {
+        setupClickHandlers();
+    }
 
     networkLoaded = true;
     document.getElementById("loading-overlay").classList.add("hidden");

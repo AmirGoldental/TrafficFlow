@@ -31,7 +31,7 @@ class RoadSegment:
 
     @property
     def travel_time(self) -> float:
-        return self.length / self.speed_limit
+        return self.length / max(self.speed_limit, 0.1)
 
 
 @dataclass
