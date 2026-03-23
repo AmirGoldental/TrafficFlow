@@ -93,7 +93,11 @@ function connectWebSocket() {
         }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+        if (event.code === 4000) {
+            console.log("WebSocket replaced by new connection, not reconnecting.");
+            return;
+        }
         console.log("WebSocket closed, reconnecting in 2s...");
         setTimeout(connectWebSocket, 2000);
     };

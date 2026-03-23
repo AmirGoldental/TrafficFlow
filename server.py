@@ -82,7 +82,7 @@ async def simulation_ws(ws: WebSocket):
     # Only one simulation at a time — kick previous connection
     if _active_ws is not None:
         try:
-            await _active_ws.close(1000, "replaced by new connection")
+            await _active_ws.close(4000, "replaced by new connection")
         except Exception:
             pass
     _active_ws = ws
