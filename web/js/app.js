@@ -17,6 +17,9 @@ let signalColorMap = {};
 // Keep our own copy of indicator GeoJSON (avoid accessing MapLibre internals)
 let indicatorGeoJSON = null;
 
+// Frame throttling: skip frames if previous one hasn't finished rendering
+let processingFrame = false;
+
 // ------------------------------------------------------------------ arrow polygon (client-side)
 const VEHICLE_LENGTH = 7.0;
 const VEHICLE_WIDTH = 2.0;
@@ -268,19 +271,27 @@ function onNetwork(msg) {
 function onFrame(msg) {
     if (!networkLoaded) return;
 
-    // Build GeoJSON from compact vehicle array and update
-    const vehicleSrc = map.getSource("vehicles");
-    if (vehicleSrc && msg.vehicles) {
-        vehicleSrc.setData(vehiclesToGeoJSON(msg.vehicles));
-    }
+    // Skip frame if previous one hasn't finished rendering
+    if (processingFrame) return;
+    processingFrame = true;
 
-    // Update signal indicator colours
-    if (msg.signals && msg.signals.length > 0) {
-        updateSignalIndicators(msg.signals);
-    }
+    requestAnimationFrame(() => {
+        // Build GeoJSON from compact vehicle array and update
+        const vehicleSrc = map.getSource("vehicles");
+        if (vehicleSrc && msg.vehicles) {
+            vehicleSrc.setData(vehiclesToGeoJSON(msg.vehicles));
+        }
 
-    // Update stats
-    updateStats(msg);
+        // Update signal indicator colours
+        if (msg.signals && msg.signals.length > 0) {
+            updateSignalIndicators(msg.signals);
+        }
+
+        // Update stats
+        updateStats(msg);
+
+        processingFrame = false;
+    });
 }
 
 function updateSignalIndicators(signals) {

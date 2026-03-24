@@ -93,7 +93,7 @@ async def simulation_ws(ws: WebSocket):
     sim = Simulation(_network, num_vehicles=_num_vehicles)
     paused = False
     speed_mult = 1.0
-    target_fps = 20
+    target_fps = 10
     frame_interval = 1.0 / target_fps
 
     # Send static network data
@@ -115,7 +115,9 @@ async def simulation_ws(ws: WebSocket):
 
             frame = serialize_frame(sim)
             try:
-                await ws.send_json(frame)
+                await asyncio.wait_for(ws.send_json(frame), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass  # drop frame rather than stall
             except Exception:
                 return
             await asyncio.sleep(frame_interval)
