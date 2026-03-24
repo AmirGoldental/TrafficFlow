@@ -128,6 +128,26 @@ class Simulation:
                     leader_pos = other.pos
                     break
 
+            # Spillback: if no leader on current segment, check the rearmost
+            # vehicle on the next segment to prevent entering a full segment
+            if leader_gap is None and v.route_idx + 2 < len(v.route):
+                next_u = v.route[v.route_idx + 1]
+                next_v = v.route[v.route_idx + 2]
+                next_seg = self.network.get_segment(next_u, next_v)
+                if next_seg is not None:
+                    next_ordered = seg_vehicles.get(next_seg.edge_id, [])
+                    target_lane = min(v.lane, next_seg.lanes - 1)
+                    for other in next_ordered:
+                        if other.lane == target_lane:
+                            # Gap = remaining distance on current seg + other's pos - vehicle length
+                            dist_to_end = seg.length - v.pos
+                            cross_gap = dist_to_end + other.pos - 7.0
+                            if leader_gap is None or cross_gap < leader_gap:
+                                leader_gap = cross_gap
+                                leader_speed = other.speed
+                                leader_pos = None  # disable hard clamp for cross-segment
+                            break  # first match is rearmost (list sorted ascending)
+
             old_seg = seg
             v.step(self.dt, leader_gap, leader_speed)
 
