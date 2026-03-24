@@ -16,9 +16,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from src.config import SimConfig
 from src.map_loader import load_graph, load_corridor, get_traffic_signal_nodes, CORRIDORS
 from src.network import RoadNetwork
-from src.simulation import Simulation
+from src.runner import SimulationRunner
 from src.visualizer import static_map, animate
 
 
@@ -33,8 +34,19 @@ def main():
                         help="Simulation duration (s)")
     parser.add_argument("--save", type=str, default=None,
                         help="Save output to file (PNG for map, GIF for animate)")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to JSON config file")
+    parser.add_argument("--export", type=str, default=None,
+                        help="Export vehicle trajectories to CSV (run mode only)")
     parser.add_argument("--force-download", action="store_true")
     args = parser.parse_args()
+
+    # ---------------------------------------------------------------- config
+    if args.config:
+        config = SimConfig.from_json(args.config)
+        print(f"Loaded config from {args.config}")
+    else:
+        config = SimConfig()
 
     # ---------------------------------------------------------------- data
     if args.corridor:
@@ -56,6 +68,8 @@ def main():
         num_vehicles = 300
 
     # ---------------------------------------------------------------- mode
+    runner = SimulationRunner(network, config)
+
     if args.mode == "map":
         print(f"\n=== Rendering static map ===")
         save = args.save or f"data/{'corridor_' + args.corridor if args.corridor else 'boston'}_map.png"
@@ -63,13 +77,19 @@ def main():
 
     elif args.mode == "animate":
         print(f"\n=== Simulation: {num_vehicles} vehicles, {args.duration}s ===")
-        sim = Simulation(network, num_vehicles=num_vehicles)
+        sim = runner.create(num_vehicles=num_vehicles)
         animate(sim, duration=args.duration, save_path=args.save)
 
     elif args.mode == "run":
         print(f"\n=== Headless simulation: {num_vehicles} vehicles, {args.duration}s ===")
-        sim = Simulation(network, num_vehicles=num_vehicles)
-        sim.run(duration=args.duration)
+        sim = runner.create(num_vehicles=num_vehicles)
+
+        if args.export:
+            print(f"Exporting trajectories to {args.export} ...")
+            runner.export_trajectories(args.export, duration=args.duration)
+            print(f"  Export complete: {args.export}")
+        else:
+            sim.run(duration=args.duration)
 
         if sim.stats:
             avg_speeds = [s["avg_speed_kmh"] for s in sim.stats]

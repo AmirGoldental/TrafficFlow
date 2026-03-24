@@ -192,6 +192,36 @@ body {
     padding-left: 16px;
 }
 
+/* ------------------------------------------------------------------ connection indicator */
+#connection-status {
+    position: absolute;
+    top: 12px;
+    right: 292px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #ff3333;
+    z-index: 20;
+    transition: background 0.3s;
+    box-shadow: 0 0 6px rgba(0,0,0,0.5);
+}
+#connection-status.connected { background: #00ff88; }
+#connection-status.reconnecting { background: #ffdd00; }
+
+#pause-overlay {
+    position: absolute;
+    top: 50%;
+    left: calc(50% - 140px);
+    transform: translate(-50%, -50%);
+    font-size: 24px;
+    font-weight: 700;
+    color: rgba(255,255,255,0.3);
+    letter-spacing: 4px;
+    z-index: 15;
+    pointer-events: none;
+    display: none;
+}
+#pause-overlay.visible { display: block; }
+
 /* ------------------------------------------------------------------ popup */
 .maplibregl-popup-content {
     background: rgba(20, 20, 40, 0.95) !important;

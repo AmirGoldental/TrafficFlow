@@ -131,10 +131,19 @@ function connectWebSocket() {
 
     ws.onopen = () => {
         console.log("WebSocket connected");
+        const indicator = document.getElementById("connection-status");
+        indicator.className = "connected";
+        indicator.title = "Connected";
     };
 
     ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
+        let msg;
+        try {
+            msg = JSON.parse(event.data);
+        } catch (e) {
+            console.error("Failed to parse WebSocket message:", e);
+            return;
+        }
         switch (msg.type) {
             case "network":
                 onNetwork(msg);
@@ -145,20 +154,34 @@ function connectWebSocket() {
             case "inspect_result":
                 onInspectResult(msg);
                 break;
+            case "error":
+                console.error("Server error:", msg.message);
+                break;
+            default:
+                console.warn("Unknown message type:", msg.type);
+                break;
         }
     };
 
     ws.onclose = (event) => {
+        const indicator = document.getElementById("connection-status");
         if (event.code === 4000) {
             console.log("WebSocket replaced by new connection, not reconnecting.");
+            indicator.className = "";
+            indicator.title = "Disconnected (replaced)";
             return;
         }
         console.log("WebSocket closed, reconnecting in 2s...");
+        indicator.className = "reconnecting";
+        indicator.title = "Reconnecting...";
         setTimeout(connectWebSocket, 2000);
     };
 
     ws.onerror = (err) => {
         console.error("WebSocket error:", err);
+        const indicator = document.getElementById("connection-status");
+        indicator.className = "";
+        indicator.title = "Connection error";
     };
 }
 
@@ -352,8 +375,29 @@ function drawSparkline() {
 
     if (speedHistory.length < 2) return;
 
-    const max = Math.max(...speedHistory, 1);
+    // Fixed max of 60 km/h, auto-scale only if exceeded
+    const max = Math.max(60, ...speedHistory, 1);
     const step = w / (MAX_HISTORY - 1);
+
+    // Subtle grid lines
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 0.5;
+    for (let gridVal of [15, 30, 45]) {
+        const gy = h - (gridVal / max) * (h - 4);
+        ctx.beginPath();
+        ctx.moveTo(0, gy);
+        ctx.lineTo(w, gy);
+        ctx.stroke();
+    }
+
+    // Grid labels
+    ctx.fillStyle = "rgba(255,255,255,0.2)";
+    ctx.font = "9px sans-serif";
+    ctx.textAlign = "left";
+    for (let gridVal of [15, 30, 45]) {
+        const gy = h - (gridVal / max) * (h - 4);
+        ctx.fillText(`${gridVal}`, 2, gy - 2);
+    }
 
     // Fill gradient
     const grad = ctx.createLinearGradient(0, 0, 0, h);
@@ -398,6 +442,7 @@ function initControls() {
         paused = !paused;
         document.getElementById("play-icon").textContent = paused ? "▶" : "⏸";
         btnPlay.classList.toggle("active", !paused);
+        document.getElementById("pause-overlay").classList.toggle("visible", paused);
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({
                 type: "control",

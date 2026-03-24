@@ -17,10 +17,13 @@ single controller so they act as one real-world intersection.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, TYPE_CHECKING
 import math
 
+if TYPE_CHECKING:
+    from .config import SignalConfig
 
+# Defaults (used when no config is provided)
 GREEN_DURATION = 30.0    # seconds each phase is green
 YELLOW_DURATION = 3.0    # seconds of yellow/clearance
 CYCLE_LENGTH = 2 * (GREEN_DURATION + YELLOW_DURATION)
@@ -45,9 +48,12 @@ class TrafficLight:
     """
 
     def __init__(self, node_ids: List[int], incoming_segments,
-                 network, offset: float = 0.0):
+                 network, offset: float = 0.0, signal_config: "SignalConfig" = None):
         self.node_ids = node_ids   # all OSM nodes controlled by this light
-        self.offset = offset % CYCLE_LENGTH
+        self._green_dur = signal_config.green_duration if signal_config else GREEN_DURATION
+        self._yellow_dur = signal_config.yellow_duration if signal_config else YELLOW_DURATION
+        self._cycle_len = 2 * (self._green_dur + self._yellow_dur)
+        self.offset = offset % self._cycle_len
 
         # Compute bearing for each incoming segment and split into two phases
         self._phase_segs: List[Set] = [set(), set()]
@@ -56,13 +62,14 @@ class TrafficLight:
             u_inter = network.intersections[seg.u]
             v_inter = network.intersections[seg.v]
             b = _bearing(u_inter.x, u_inter.y, v_inter.x, v_inter.y)
-            # Normalise to 0-180 (opposing directions are the same phase)
-            b_norm = b % 180
-            # 45-135 = roughly E-W (phase 1), else N-S (phase 0)
-            if 45 <= b_norm < 135:
-                self._phase_segs[1].add(seg.edge_id)
+            # Use dominant-axis check: if |sin(bearing)| > |cos(bearing)|
+            # the road is more E-W (phase 1), else more N-S (phase 0).
+            # This handles all angles consistently, including diagonals.
+            b_rad = math.radians(b)
+            if abs(math.sin(b_rad)) > abs(math.cos(b_rad)):
+                self._phase_segs[1].add(seg.edge_id)  # E-W
             else:
-                self._phase_segs[0].add(seg.edge_id)
+                self._phase_segs[0].add(seg.edge_id)  # N-S
 
         # If one phase is empty, put everything in phase 0
         if not self._phase_segs[0] and self._phase_segs[1]:
@@ -70,26 +77,26 @@ class TrafficLight:
             self._phase_segs[1] = set()
 
         # Apply offset to stagger signal timing across intersections
-        phase_duration = GREEN_DURATION + YELLOW_DURATION
-        offset_in_cycle = self.offset % CYCLE_LENGTH
+        phase_duration = self._green_dur + self._yellow_dur
+        offset_in_cycle = self.offset % self._cycle_len
         self._current_phase = int(offset_in_cycle // phase_duration) % len(self._phase_segs)
         elapsed_in_phase = offset_in_cycle % phase_duration
-        if elapsed_in_phase < GREEN_DURATION:
+        if elapsed_in_phase < self._green_dur:
             self._state = "green"
             self._elapsed = elapsed_in_phase
         else:
             self._state = "yellow"
-            self._elapsed = elapsed_in_phase - GREEN_DURATION
+            self._elapsed = elapsed_in_phase - self._green_dur
 
     # ------------------------------------------------------------------
     def step(self, dt: float):
         """Advance the light by dt seconds."""
         self._elapsed += dt
-        if self._state == "green" and self._elapsed >= GREEN_DURATION:
-            self._elapsed -= GREEN_DURATION
+        if self._state == "green" and self._elapsed >= self._green_dur:
+            self._elapsed -= self._green_dur
             self._state = "yellow"
-        elif self._state == "yellow" and self._elapsed >= YELLOW_DURATION:
-            self._elapsed -= YELLOW_DURATION
+        elif self._state == "yellow" and self._elapsed >= self._yellow_dur:
+            self._elapsed -= self._yellow_dur
             self._state = "green"
             self._current_phase = (self._current_phase + 1) % len(self._phase_segs)
 
@@ -107,6 +114,18 @@ class TrafficLight:
     def current_phase(self) -> int:
         return self._current_phase
 
+    def get_state(self) -> dict:
+        """Serializable state for visualization/logging."""
+        return {
+            "state": self._state,
+            "phase": self._current_phase,
+            "elapsed": round(self._elapsed, 2),
+            "green_duration": self._green_dur,
+            "yellow_duration": self._yellow_dur,
+            "cycle_length": self._cycle_len,
+            "node_ids": self.node_ids,
+        }
+
     def phase_for_edge(self, edge_id: Tuple) -> int:
         """Return which phase (0 or 1) this edge belongs to, or -1."""
         for i, phase_set in enumerate(self._phase_segs):
@@ -119,9 +138,9 @@ class TrafficLight:
         if self.is_green(edge_id):
             return 0.0
         if self._state == "green":
-            return (GREEN_DURATION - self._elapsed) + YELLOW_DURATION
+            return (self._green_dur - self._elapsed) + self._yellow_dur
         else:
-            return YELLOW_DURATION - self._elapsed
+            return self._yellow_dur - self._elapsed
 
 
 # ---------------------------------------------------------------------- manager
@@ -188,8 +207,8 @@ def _cluster_signal_nodes(network, radius_m: float = CLUSTER_RADIUS_M):
     return list(clusters_dict.values())
 
 
-EXPAND_SEG_MAX_M = 20.0   # only follow segments shorter than this
-EXPAND_DIST_MAX_M = 40.0  # max total distance from nearest signal node
+EXPAND_SEG_MAX_M = 20.0   # only follow segments shorter than this (default)
+EXPAND_DIST_MAX_M = 40.0  # max total distance from nearest signal node (default)
 
 
 def _expand_cluster(cluster: List[int], network, seg_max=EXPAND_SEG_MAX_M,
@@ -257,23 +276,30 @@ class TrafficLightManager:
     controller covers the full physical intersection.
     """
 
-    def __init__(self, network):
+    def __init__(self, network, signal_config: "SignalConfig" = None):
         self.lights: Dict[int, TrafficLight] = {}  # node_id -> TrafficLight
         self._controllers: List[TrafficLight] = []  # unique controllers
+        self._signal_config = signal_config
+        self._network = network
         self._build(network)
 
     def _build(self, network):
         import random
         rng = random.Random(42)
 
-        clusters = _cluster_signal_nodes(network)
+        sc = self._signal_config
+        radius = sc.cluster_radius_m if sc else CLUSTER_RADIUS_M
+        seg_max = sc.expand_seg_max_m if sc else EXPAND_SEG_MAX_M
+        dist_max = sc.expand_dist_max_m if sc else EXPAND_DIST_MAX_M
+
+        clusters = _cluster_signal_nodes(network, radius_m=radius)
 
         total_signal = sum(len(c) for c in clusters)
         total_expanded = 0
 
         for cluster in clusters:
             # Expand cluster to include nearby junction nodes
-            expanded = _expand_cluster(cluster, network)
+            expanded = _expand_cluster(cluster, network, seg_max=seg_max, dist_max=dist_max)
             total_expanded += len(expanded) - len(cluster)
 
             # Gather all incoming segments for every node in the expanded cluster
@@ -281,8 +307,9 @@ class TrafficLightManager:
             for nid in expanded:
                 all_incoming.extend(network.intersections[nid].incoming)
 
-            offset = rng.uniform(0, CYCLE_LENGTH)
-            light = TrafficLight(expanded, all_incoming, network, offset)
+            cycle_len = sc.cycle_length if sc else CYCLE_LENGTH
+            offset = rng.uniform(0, cycle_len)
+            light = TrafficLight(expanded, all_incoming, network, offset, signal_config=sc)
             self._controllers.append(light)
 
             # Map every node in the expanded cluster to this shared controller
@@ -304,10 +331,16 @@ class TrafficLightManager:
         light = self.lights.get(node_id)
         if light is None:
             return True
-        # Intra-cluster segment: never stop inside an intersection
+        # Intra-cluster bypass: never stop inside an intersection.
+        # Only bypass if the source node is in the SAME controller AND
+        # the segment is short (internal intersection geometry, not a
+        # real approach road that happens to connect two cluster nodes).
         source_node = incoming_edge_id[0]
         if source_node in self.lights and self.lights[source_node] is light:
-            return True
+            seg = self._network.segments.get(incoming_edge_id)
+            seg_max = self._signal_config.expand_seg_max_m if self._signal_config else EXPAND_SEG_MAX_M
+            if seg is None or seg.length < seg_max:
+                return True
         return light.is_green(incoming_edge_id)
 
     def time_until_green(self, node_id: int, incoming_edge_id: Tuple) -> float:

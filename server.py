@@ -22,9 +22,10 @@ from fastapi.responses import FileResponse
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from src.config import SimConfig
 from src.map_loader import load_corridor, load_graph, get_traffic_signal_nodes, CORRIDORS
 from src.network import RoadNetwork
-from src.simulation import Simulation
+from src.runner import SimulationRunner
 from src.state_serializer import (
     serialize_network,
     serialize_frame,
@@ -36,6 +37,8 @@ from src.state_serializer import (
 _network: RoadNetwork = None
 _corridor_name: str = "warren_st"
 _num_vehicles: int = None
+_sim_config: SimConfig = None
+_runner: SimulationRunner = None
 _active_sim_lock = None  # asyncio.Lock, created at startup
 _active_ws = None        # track the single active WebSocket
 
@@ -53,8 +56,9 @@ async def lifespan(app: FastAPI):
           f"{sum(1 for i in _network.intersections.values() if i.is_signal)} signals",
           flush=True)
     print(f"Default vehicles: {_num_vehicles}", flush=True)
-    global _active_sim_lock
+    global _active_sim_lock, _runner
     _active_sim_lock = asyncio.Lock()
+    _runner = SimulationRunner(_network, _sim_config)
     yield
 
 
@@ -70,6 +74,16 @@ async def index():
     return FileResponse(os.path.join(WEB_DIR, "index.html"))
 
 
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "corridor": _corridor_name,
+        "segments": len(_network.segments) if _network else 0,
+        "default_vehicles": _num_vehicles,
+    }
+
+
 # ------------------------------------------------------------------ websocket
 
 @app.websocket("/ws/simulation")
@@ -78,17 +92,15 @@ async def simulation_ws(ws: WebSocket):
     await ws.accept()
 
     # Only one simulation at a time — kick previous connection
-    if _active_ws is not None:
-        try:
-            await _active_ws.close(4000, "replaced by new connection")
-        except Exception:
-            pass
-    _active_ws = ws
+    async with _active_sim_lock:
+        if _active_ws is not None:
+            try:
+                await _active_ws.close(4000, "replaced by new connection")
+            except Exception:
+                pass
+        _active_ws = ws
 
-    # Clear any stale vehicle IDs from shared network segments
-    for seg in _network.segments.values():
-        seg.vehicles.clear()
-    sim = Simulation(_network, num_vehicles=_num_vehicles)
+    sim = _runner.reset(num_vehicles=_num_vehicles)
     paused = False
     speed_mult = 1.0
     target_fps = 10
@@ -101,23 +113,34 @@ async def simulation_ws(ws: WebSocket):
     # Send initial frame
     await ws.send_json(serialize_frame(sim))
 
+    # Flag to signal the loop task to stop cleanly
+    loop_running = True
+
     async def sim_loop():
         nonlocal paused, speed_mult, sim
-        while True:
+        while loop_running:
             if paused:
                 await asyncio.sleep(0.05)
                 continue
 
-            steps = max(1, int(speed_mult))
-            for _ in range(steps):
-                sim.step()
-
-            frame = serialize_frame(sim)
             try:
-                await asyncio.wait_for(ws.send_json(frame), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass  # drop frame rather than stall
-            except Exception:
+                steps = max(1, int(speed_mult))
+                for _ in range(steps):
+                    sim.step()
+
+                frame = serialize_frame(sim)
+                try:
+                    await asyncio.wait_for(ws.send_json(frame), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass  # drop frame rather than stall
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                print(f"sim_loop error: {e}")
+                try:
+                    await ws.send_json({"type": "error", "message": str(e)})
+                except Exception:
+                    pass
                 return
             await asyncio.sleep(frame_interval)
 
@@ -138,13 +161,25 @@ async def simulation_ws(ws: WebSocket):
                 elif action == "speed":
                     speed_mult = max(0.25, min(10.0, float(msg.get("value", 1.0))))
                 elif action == "reset":
-                    # Pause loop, clear segments, create new sim, resume
-                    paused = True
-                    await asyncio.sleep(0.1)  # let sim_loop reach its pause point
-                    for seg in _network.segments.values():
-                        seg.vehicles.clear()
-                    sim = Simulation(_network, num_vehicles=_num_vehicles)
+                    # Cancel the loop task and wait for it to finish
+                    loop_task.cancel()
+                    try:
+                        await loop_task
+                    except asyncio.CancelledError:
+                        pass
+
+                    # Safe to reset now — no concurrent access
+                    sim = _runner.reset(num_vehicles=_num_vehicles)
+
+                    # Send fresh network + frame
+                    network_json = serialize_network(_network, sim.light_mgr)
+                    await ws.send_json({"type": "network", **network_json})
+                    await ws.send_json(serialize_frame(sim))
+
+                    # Restart the loop
                     paused = False
+                    loop_running = True
+                    loop_task = asyncio.create_task(sim_loop())
 
             elif msg_type == "inspect":
                 target = msg.get("target")
@@ -163,6 +198,10 @@ async def simulation_ws(ws: WebSocket):
         print(f"WebSocket error: {e}")
     finally:
         loop_task.cancel()
+        try:
+            await loop_task
+        except asyncio.CancelledError:
+            pass
         if _active_ws is ws:
             _active_ws = None
 
@@ -177,11 +216,20 @@ def main():
     parser.add_argument("--vehicles", type=int, default=None)
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to JSON config file for simulation parameters")
     args = parser.parse_args()
 
-    global _corridor_name, _num_vehicles
+    global _corridor_name, _num_vehicles, _sim_config
     _corridor_name = args.corridor
     _num_vehicles = args.vehicles
+    if args.config:
+        _sim_config = SimConfig.from_json(args.config)
+        print(f"Loaded config from {args.config}")
+    else:
+        _sim_config = SimConfig()
+    if _num_vehicles is not None:
+        _sim_config.num_vehicles = _num_vehicles
 
     print(f"\n  TrafficFlow Dashboard")
     print(f"  Open http://{args.host}:{args.port} in your browser\n")

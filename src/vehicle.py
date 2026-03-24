@@ -15,19 +15,11 @@ Each vehicle:
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, TYPE_CHECKING
 import math
 
-# IDM parameters (tunable)
-IDM_V0 = 13.9      # desired speed (m/s) ≈ 50 km/h
-IDM_T = 1.5        # safe time headway (s)
-IDM_A = 1.5        # max acceleration (m/s²)
-IDM_B = 2.0        # comfortable deceleration (m/s²)
-IDM_S0 = 3.0       # minimum gap (m) — bumper-to-bumper
-IDM_DELTA = 4.0    # acceleration exponent
-
-# Stop-line distance: vehicle stops this far before end of segment at red light
-STOP_MARGIN = 3.0  # metres
+if TYPE_CHECKING:
+    from .config import SimConfig
 
 
 @dataclass
@@ -36,6 +28,7 @@ class Vehicle:
     route: List[int]            # sequence of node ids
     network: object             # RoadNetwork (avoid circular import)
     light_mgr: object           # TrafficLightManager
+    config: "SimConfig" = None  # simulation config (injected)
 
     # Kinematic state
     speed: float = 0.0          # m/s
@@ -70,8 +63,13 @@ class Vehicle:
         return None
 
     # ---------------------------------------------------------------
-    def step(self, dt: float, leader_gap: Optional[float], leader_speed: Optional[float]):
-        """Advance vehicle by dt seconds."""
+    def step(self, dt: float, leader_gap: Optional[float], leader_speed: Optional[float],
+             tracker=None):
+        """Advance vehicle by dt seconds.
+
+        If tracker is provided, segment transitions go through it.
+        Otherwise falls back to direct segment list manipulation.
+        """
         if not self.active:
             return
 
@@ -80,7 +78,8 @@ class Vehicle:
             self.active = False
             return
 
-        v0 = min(IDM_V0, seg.speed_limit) or IDM_V0  # fallback if speed_limit is 0
+        idm = self.config.idm
+        v0 = min(idm.v0, seg.speed_limit) if seg.speed_limit > 0 else idm.v0
         dist_to_end = seg.length - self.pos
 
         # Check traffic light at end of segment
@@ -103,18 +102,32 @@ class Vehicle:
         while self.pos >= seg.length and max_transitions > 0:
             max_transitions -= 1
             overflow = self.pos - seg.length
-            try:
-                seg.vehicles.remove(self.vid)
-            except ValueError:
-                pass  # already removed (e.g. by reset)
             self.route_idx += 1
             self.pos = overflow
 
             next_seg = self.current_segment
             if next_seg is None:
+                # Remove from old segment
+                if tracker:
+                    tracker.move(self.vid, seg, seg)  # will remove from old
+                else:
+                    try:
+                        seg.vehicles.remove(self.vid)
+                    except ValueError:
+                        pass
                 self.active = False
                 return
-            next_seg.vehicles.append(self.vid)
+
+            # Transition via tracker or direct
+            if tracker:
+                tracker.move(self.vid, seg, next_seg)
+            else:
+                try:
+                    seg.vehicles.remove(self.vid)
+                except ValueError:
+                    pass
+                next_seg.vehicles.append(self.vid)
+
             # Keep current lane, clamped to new segment's lane count
             self.lane = min(self.lane, next_seg.lanes - 1)
             seg = next_seg
@@ -130,8 +143,8 @@ class Vehicle:
             return None
         if self.light_mgr.is_green(next_node, seg.edge_id):
             return None
-        # Red: stop STOP_MARGIN before the end
-        gap = dist_to_end - STOP_MARGIN
+        # Red: stop before the end
+        gap = dist_to_end - self.config.vehicle.stop_margin
         return max(gap, 0.0)
 
     def _effective_gap_and_speed(
@@ -152,14 +165,17 @@ class Vehicle:
             candidates.append((red_gap, 0.0))
 
         if not candidates:
-            return (1e6, self.speed)   # free-flow
+            # Free-flow: large gap + leader_speed = self.speed → IDM gives
+            # dv=0 and (s_star/s)^2 ≈ 0, yielding near-max acceleration.
+            return (1e6, self.speed)
 
         return min(candidates, key=lambda c: c[0])
 
     def _idm_accel(self, v0: float, gap: float, v_lead: float) -> float:
+        idm = self.config.idm
         v = self.speed
         dv = v - v_lead
-        s_star = IDM_S0 + max(0.0, v * IDM_T + v * dv / (2 * math.sqrt(IDM_A * IDM_B)))
+        s_star = idm.s0 + max(0.0, v * idm.T + v * dv / (2 * math.sqrt(idm.a * idm.b)))
         s = max(gap, 0.01)
-        a = IDM_A * (1.0 - (v / v0) ** IDM_DELTA - (s_star / s) ** 2)
-        return max(-IDM_B * 2, min(IDM_A, a))
+        a = idm.a * (1.0 - (v / v0) ** idm.delta - (s_star / s) ** 2)
+        return max(-idm.b * 2, min(idm.a, a))

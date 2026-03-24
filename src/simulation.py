@@ -13,12 +13,12 @@ from typing import Dict, List, Optional
 import random
 import math
 
+from .config import SimConfig
+from .follower import FollowerService
 from .network import RoadNetwork
 from .traffic_light import TrafficLightManager
 from .vehicle import Vehicle
-
-DT = 0.5            # simulation time step (seconds)
-SPAWN_INTERVAL = 5  # spawn a new vehicle every N seconds (on average)
+from .vehicle_tracker import VehicleTracker
 
 
 class Simulation:
@@ -27,20 +27,28 @@ class Simulation:
         network: RoadNetwork,
         num_vehicles: int = 200,
         seed: int = 42,
-        dt: float = DT,
+        dt: float = None,
+        vid_offset: int = 0,
+        config: SimConfig = None,
     ):
-        self.network = network
-        self.light_mgr = TrafficLightManager(network)
-        self.dt = dt
-        self.time = 0.0
-        self.rng = random.Random(seed)
+        self.config = config or SimConfig()
+        if num_vehicles != 200:
+            self.config.num_vehicles = num_vehicles
+        if seed != 42:
+            self.config.seed = seed
 
-        self.vehicles: Dict[int, Vehicle] = {}
-        self._next_vid = 0
+        self.network = network
+        self.light_mgr = TrafficLightManager(network, signal_config=self.config.signal)
+        self.dt = dt if dt is not None else self.config.dt
+        self.time = 0.0
+        self.rng = random.Random(self.config.seed)
+
+        self.tracker = VehicleTracker()
+        self.follower = FollowerService(network, self.light_mgr, self.config)
+        self._next_vid = vid_offset
 
         # Pre-sample origin/destination node pairs
         self._node_list = list(network.intersections.keys())
-        self._spawn_queue: List[Vehicle] = []
 
         # Spawn initial vehicles
         for _ in range(num_vehicles):
@@ -48,6 +56,11 @@ class Simulation:
 
         self.stats: List[Dict] = []   # capped to last 500 entries
         self._max_stats = 500
+
+    @property
+    def vehicles(self) -> Dict[int, Vehicle]:
+        """Backward-compatible access to vehicle dict via tracker."""
+        return self.tracker.vehicles
 
     # ------------------------------------------------------------------
     def _random_node(self) -> int:
@@ -71,6 +84,7 @@ class Simulation:
                 route=route,
                 network=self.network,
                 light_mgr=self.light_mgr,
+                config=self.config,
                 speed=self.rng.uniform(0, 5),
             )
             seg = v.current_segment
@@ -79,8 +93,7 @@ class Simulation:
             v.lane = self.rng.randint(0, seg.lanes - 1)
             # Offset spawn to avoid overlapping existing vehicles at pos=0
             v.pos = self.rng.uniform(0, min(seg.length * 0.5, 20.0))
-            seg.vehicles.append(vid)
-            self.vehicles[vid] = v
+            self.tracker.add(v, seg)
             return v
         return None
 
@@ -89,19 +102,12 @@ class Simulation:
         """Advance simulation by one dt."""
         self.light_mgr.step(self.dt)
 
-        # Build per-segment sorted vehicle list (by position, ascending)
-        seg_vehicles: Dict = {}
-        for seg_id, seg in self.network.segments.items():
-            if seg.vehicles:
-                ordered = sorted(
-                    [self.vehicles[vid] for vid in seg.vehicles if vid in self.vehicles],
-                    key=lambda v: v.pos,
-                )
-                seg_vehicles[seg_id] = ordered
+        # Build per-segment sorted vehicle index
+        self.tracker.build_segment_index()
 
         # Step each vehicle
         dead = []
-        for vid, v in self.vehicles.items():
+        for vid, v in list(self.vehicles.items()):
             if not v.active:
                 dead.append(vid)
                 continue
@@ -111,78 +117,21 @@ class Simulation:
                 dead.append(vid)
                 continue
 
-            # Find nearest leader on same segment AND same lane
-            # List is sorted ascending by pos; scan from v's position upward
-            ordered = seg_vehicles.get(seg.edge_id, [])
-            leader_gap = None
-            leader_speed = None
-            leader_pos = None
-            found_self = False
-            for other in ordered:
-                if other.vid == vid:
-                    found_self = True
-                    continue
-                if found_self and other.lane == v.lane:
-                    leader_gap = other.pos - v.pos - 7.0  # 7 m vehicle length
-                    leader_speed = other.speed
-                    leader_pos = other.pos
-                    break
-
-            # Spillback: if no leader on current segment, look ahead along
-            # the route to find the nearest vehicle to brake for.
-            # "Don't block the box": if next segments are inside an
-            # intersection cluster, skip past them to check the exit segment.
-            if leader_gap is None and v.route_idx + 2 < len(v.route):
-                lookahead_dist = seg.length - v.pos  # distance to end of current seg
-                max_lookahead = 5  # max segments to scan ahead
-                for look_i in range(max_lookahead):
-                    ri = v.route_idx + 1 + look_i
-                    if ri + 1 >= len(v.route):
-                        break
-                    look_u = v.route[ri]
-                    look_v = v.route[ri + 1]
-                    look_seg = self.network.get_segment(look_u, look_v)
-                    if look_seg is None:
-                        break
-                    look_ordered = seg_vehicles.get(look_seg.edge_id, [])
-                    target_lane = min(v.lane, look_seg.lanes - 1)
-                    for other in look_ordered:
-                        if other.lane == target_lane:
-                            cross_gap = lookahead_dist + other.pos - 7.0
-                            if leader_gap is None or cross_gap < leader_gap:
-                                leader_gap = cross_gap
-                                leader_speed = other.speed
-                                leader_pos = None  # disable hard clamp for cross-segment
-                            break
-                    # If we found a leader, stop looking further
-                    if leader_gap is not None:
-                        break
-                    # Accumulate distance through this segment
-                    lookahead_dist += look_seg.length
-                    # Only keep scanning if this is an intra-cluster segment
-                    # (inside an intersection) — otherwise stop at the first
-                    # empty segment outside the intersection
-                    src_light = self.light_mgr.lights.get(look_u)
-                    dst_light = self.light_mgr.lights.get(look_v)
-                    if not (src_light is not None and src_light is dst_light):
-                        break  # not intra-cluster, stop scanning
+            leader = self.follower.find_leader(v, self.tracker)
 
             old_seg = seg
-            v.step(self.dt, leader_gap, leader_speed)
+            v.step(self.dt, leader.gap, leader.speed, tracker=self.tracker)
 
-            # Hard clamp: never overlap with leader (only if still on same segment)
-            if leader_pos is not None and v.current_segment == old_seg:
-                max_pos = leader_pos - 7.0 - 0.5  # vehicle length + min buffer
+            # Hard clamp: never overlap with leader (only on same segment)
+            if leader.on_same_segment and leader.pos is not None and v.current_segment == old_seg:
+                max_pos = leader.pos - self.config.vehicle.length - 0.5
                 if v.pos > max_pos:
                     v.pos = max(max_pos, 0.0)
-                    v.speed = min(v.speed, leader_speed or 0.0)
+                    v.speed = min(v.speed, leader.speed or 0.0)
 
         # Remove completed/stuck vehicles and spawn replacements
         for vid in dead:
-            v = self.vehicles.pop(vid)
-            seg = v.current_segment
-            if seg and vid in seg.vehicles:
-                seg.vehicles.remove(vid)
+            self.tracker.remove(vid)
             self._spawn_vehicle()
 
         self.time += self.dt

@@ -84,11 +84,24 @@ class RoadNetwork:
             self.intersections[u].outgoing.append(seg)
             self.intersections[v].incoming.append(seg)
 
+        # Report defaults usage
+        default_speed_count = sum(
+            1 for seg in self.segments.values() if seg.speed_limit == DEFAULT_SPEED_MS
+        )
+        default_lanes_count = sum(
+            1 for seg in self.segments.values() if seg.lanes == DEFAULT_LANES
+        )
         print(
             f"RoadNetwork built: {len(self.intersections)} intersections, "
             f"{len(self.segments)} segments, "
             f"{sum(1 for i in self.intersections.values() if i.is_signal)} signals"
         )
+        if default_speed_count or default_lanes_count:
+            print(
+                f"  Defaults applied: {default_speed_count} segments used default speed, "
+                f"{default_lanes_count} used default lanes"
+            )
+        self._validate_connectivity()
 
     def _parse_speed(self, value) -> float:
         if value is None:
@@ -109,6 +122,17 @@ class RoadNetwork:
             return max(1, int(value))
         except (ValueError, TypeError):
             return DEFAULT_LANES
+
+    def _validate_connectivity(self):
+        """Check for disconnected components and warn."""
+        components = list(nx.strongly_connected_components(self.G))
+        if len(components) > 1:
+            sizes = sorted([len(c) for c in components], reverse=True)
+            print(
+                f"  Warning: {len(components)} disconnected components "
+                f"(sizes: {sizes[:5]}{'...' if len(sizes) > 5 else ''}). "
+                f"Vehicles may fail to find routes between components."
+            )
 
     def get_segment(self, u: int, v: int) -> Optional[RoadSegment]:
         """Return the first segment from u to v (any key)."""

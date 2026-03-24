@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .simulation import Simulation
     from .network import RoadNetwork
 
-# ------------------------------------------------------------------ constants
+# ------------------------------------------------------------------ constants (defaults, overridden by config)
 VEHICLE_LENGTH = 7.0   # metres
 VEHICLE_WIDTH = 2.0    # metres
 LANE_WIDTH = 3.5       # metres
@@ -265,8 +265,6 @@ def serialize_vehicle_detail(sim: "Simulation", vid: int) -> dict:
 
 def serialize_signal_detail(sim: "Simulation", node_id: int) -> dict:
     """Detailed info about a specific traffic signal."""
-    from .traffic_light import GREEN_DURATION, YELLOW_DURATION, CYCLE_LENGTH
-
     light = sim.light_mgr.lights.get(node_id)
     if light is None:
         return {"error": f"Signal {node_id} not found"}
@@ -297,9 +295,9 @@ def serialize_signal_detail(sim: "Simulation", node_id: int) -> dict:
         })
 
     if light.state == "green":
-        time_remaining = round(GREEN_DURATION - light._elapsed, 1)
+        time_remaining = round(light._green_dur - light._elapsed, 1)
     else:
-        time_remaining = round(YELLOW_DURATION - light._elapsed, 1)
+        time_remaining = round(light._yellow_dur - light._elapsed, 1)
 
     return {
         "node_id": node_id,
@@ -307,9 +305,9 @@ def serialize_signal_detail(sim: "Simulation", node_id: int) -> dict:
         "current_phase": light.current_phase,
         "state": light.state,
         "phase_groups": phase_groups,
-        "green_duration": GREEN_DURATION,
-        "yellow_duration": YELLOW_DURATION,
-        "cycle_length": CYCLE_LENGTH,
+        "green_duration": light._green_dur,
+        "yellow_duration": light._yellow_dur,
+        "cycle_length": light._cycle_len,
         "time_remaining": max(0, time_remaining),
         "incoming_roads": list({
             s.name for s in inter.incoming if s.name

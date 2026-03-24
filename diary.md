@@ -91,3 +91,70 @@ I ran a dedicated review agent for the high-level analysis, which identified ~16
 **Intra-cluster bypass:** Added a check in `TrafficLightManager.is_green()` — if both source and destination of a segment belong to the same controller, always return green. Vehicles stop at the cluster entry point, not inside the intersection.
 
 **Visual improvements:** Indicator lines now render per-controller at the cluster centroid (not per-node), are thicker (7px vs 3px), and use rounded caps. The inspect panel shows phase groups with road names, colored state blocks, and timing (cycle length, time remaining). Much clearer than "Phase 0, N-S edges: 4."
+
+---
+
+## 2026-03-24 — Session 4: Comprehensive Refactoring
+
+Amir asked for a swarm of 6 parallel reviewer sub-agents, each covering a different scope: simulation physics, traffic signals, network/data, server/WebSocket, frontend/UX, and architecture/design. They found 14 critical, 22 medium, and 16 low issues across the codebase.
+
+Based on the findings, I wrote a 10-phase plan (PLAN.md) and worked through it systematically:
+
+### Phase 1: Critical Bug Fixes
+- **Vehicle ID reuse after reset:** `_next_vid` now carries forward across resets via `vid_offset` parameter. No more ID collisions.
+- **Reset race condition:** Reset now properly cancels the sim_loop task and awaits it before clearing state. No more concurrent mutation.
+- **Task cancellation:** `finally` block now awaits `loop_task` cancellation instead of fire-and-forget.
+- **Spillback hard clamp:** Added `leader_on_same_seg` boolean — cross-segment leaders are handled by IDM alone, hard clamp only applies on same segment.
+- **Frontend:** Added JSON parse try/catch and switch default case.
+
+### Phase 2: SimConfig — Centralized Configuration
+Created `src/config.py` with nested dataclasses: `SimConfig` → `IDMConfig`, `VehicleConfig`, `SignalConfig`. All hardcoded constants (IDM params, vehicle dimensions, signal timings, cluster radii) now flow through the config object. Supports loading from JSON via `--config` CLI flag. This was the prerequisite for scenario comparison.
+
+### Phase 3: VehicleTracker — Encapsulated State
+Created `src/vehicle_tracker.py` — single owner of the vehicle-to-segment mapping. Previously, segment vehicle lists were mutated from Vehicle, Simulation, and Server in scattered locations. Now `tracker.add()`, `tracker.remove()`, `tracker.move()`, and `tracker.build_segment_index()` are the only mutation points. The `Simulation.vehicles` property delegates to the tracker for backward compat.
+
+### Phase 4: FollowerService — Extracted Leader-Finding
+The 100-line `Simulation.step()` monolith was the biggest architectural debt. Extracted the leader-finding logic (same-segment scan + cross-segment spillback + don't-block-the-box) into `src/follower.py` with a clean `FollowerService.find_leader(vehicle, tracker) → LeaderInfo` API. The `step()` method is now ~25 lines: build index → find leaders → step vehicles → clamp → cleanup.
+
+### Phase 5: SimulationRunner — Decoupled from Server
+Created `src/runner.py` wrapping Simulation with lifecycle management: `create()`, `reset()`, `step()`, `get_frame()`, `export_trajectories()`. Server.py now delegates to `_runner.reset()` instead of manually clearing segments and managing vid offsets. The runner can also be used standalone for batch experiments and CSV export.
+
+### Phase 6: Signal Fixes
+- **Diagonal road phase assignment:** Replaced the 45°-135° threshold with a dominant-axis check (`|sin| > |cos|`). All angles now get consistent assignment.
+- **Intra-cluster bypass scope narrowed:** The bypass now only applies when the segment between two cluster nodes is short (< `expand_seg_max_m`). Long segments connecting two cluster nodes are real roads and should respect the signal. This prevents vehicles running reds on approach roads that happen to connect absorbed junction nodes.
+
+### Phase 7: Network & Data Quality
+- Added default-usage logging: prints how many segments used default speed/lanes at build time.
+- Added `_validate_connectivity()` using `nx.strongly_connected_components` — warns about disconnected subgraphs that cause routing failures.
+- Verified `travel_time` edge weights are set by osmnx.
+
+### Phase 8: Server Hardening
+- `_active_sim_lock` now actually used (was created but never acquired).
+- sim_loop catches and reports exceptions to the client.
+- Added `GET /health` endpoint.
+
+### Phase 9: Frontend Robustness
+- Connection state indicator (green/red/yellow dot, top-right corner).
+- PAUSED overlay text when simulation is paused.
+- Sparkline now uses fixed 60 km/h Y-axis max with subtle grid lines and labels.
+
+### Phase 10: Testing
+Created `tests/` with 15 unit tests covering Vehicle IDM (5), TrafficLight phases (6), and FollowerService leader-finding (4). All pass in 0.16s.
+
+### New files created
+- `src/config.py` — centralized simulation config
+- `src/vehicle_tracker.py` — vehicle-segment tracking
+- `src/follower.py` — leader-finding service
+- `src/runner.py` — simulation lifecycle manager
+- `tests/conftest.py` — shared test fixtures
+- `tests/test_vehicle.py` — vehicle IDM tests
+- `tests/test_traffic_light.py` — signal phase tests
+- `tests/test_follower.py` — leader-finding tests
+
+### Completing the deferred items
+After the main refactoring pass, completed the 3 deferred items:
+- **main.py updated** to use `SimulationRunner`, added `--config` and `--export` CLI flags
+- **SignalController protocol** (`src/signal_controller.py`) — defines the interface for pluggable signal controllers. `TrafficLight` now implements it via `get_state()` method. Future adaptive/actuated controllers just need to implement the same protocol.
+- **Integration tests** (`tests/test_simulation.py`) — 6 tests using a real networkx graph: simulation runs without crash, vehicle count stability, stats recording, runner create/reset, CSV export, and config-affects-behavior.
+
+Final test count: **21 tests, all passing in 0.27s.**
