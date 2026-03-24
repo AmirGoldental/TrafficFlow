@@ -128,25 +128,44 @@ class Simulation:
                     leader_pos = other.pos
                     break
 
-            # Spillback: if no leader on current segment, check the rearmost
-            # vehicle on the next segment to prevent entering a full segment
+            # Spillback: if no leader on current segment, look ahead along
+            # the route to find the nearest vehicle to brake for.
+            # "Don't block the box": if next segments are inside an
+            # intersection cluster, skip past them to check the exit segment.
             if leader_gap is None and v.route_idx + 2 < len(v.route):
-                next_u = v.route[v.route_idx + 1]
-                next_v = v.route[v.route_idx + 2]
-                next_seg = self.network.get_segment(next_u, next_v)
-                if next_seg is not None:
-                    next_ordered = seg_vehicles.get(next_seg.edge_id, [])
-                    target_lane = min(v.lane, next_seg.lanes - 1)
-                    for other in next_ordered:
+                lookahead_dist = seg.length - v.pos  # distance to end of current seg
+                max_lookahead = 5  # max segments to scan ahead
+                for look_i in range(max_lookahead):
+                    ri = v.route_idx + 1 + look_i
+                    if ri + 1 >= len(v.route):
+                        break
+                    look_u = v.route[ri]
+                    look_v = v.route[ri + 1]
+                    look_seg = self.network.get_segment(look_u, look_v)
+                    if look_seg is None:
+                        break
+                    look_ordered = seg_vehicles.get(look_seg.edge_id, [])
+                    target_lane = min(v.lane, look_seg.lanes - 1)
+                    for other in look_ordered:
                         if other.lane == target_lane:
-                            # Gap = remaining distance on current seg + other's pos - vehicle length
-                            dist_to_end = seg.length - v.pos
-                            cross_gap = dist_to_end + other.pos - 7.0
+                            cross_gap = lookahead_dist + other.pos - 7.0
                             if leader_gap is None or cross_gap < leader_gap:
                                 leader_gap = cross_gap
                                 leader_speed = other.speed
                                 leader_pos = None  # disable hard clamp for cross-segment
-                            break  # first match is rearmost (list sorted ascending)
+                            break
+                    # If we found a leader, stop looking further
+                    if leader_gap is not None:
+                        break
+                    # Accumulate distance through this segment
+                    lookahead_dist += look_seg.length
+                    # Only keep scanning if this is an intra-cluster segment
+                    # (inside an intersection) — otherwise stop at the first
+                    # empty segment outside the intersection
+                    src_light = self.light_mgr.lights.get(look_u)
+                    dst_light = self.light_mgr.lights.get(look_v)
+                    if not (src_light is not None and src_light is dst_light):
+                        break  # not intra-cluster, stop scanning
 
             old_seg = seg
             v.step(self.dt, leader_gap, leader_speed)
