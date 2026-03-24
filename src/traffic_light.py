@@ -25,7 +25,7 @@ GREEN_DURATION = 30.0    # seconds each phase is green
 YELLOW_DURATION = 3.0    # seconds of yellow/clearance
 CYCLE_LENGTH = 2 * (GREEN_DURATION + YELLOW_DURATION)
 
-CLUSTER_RADIUS_M = 40.0  # merge signal nodes closer than this
+CLUSTER_RADIUS_M = 60.0  # merge signal nodes closer than this
 
 
 def _bearing(x1, y1, x2, y2) -> float:
@@ -141,37 +141,120 @@ def _cluster_signal_nodes(network, radius_m: float = CLUSTER_RADIUS_M):
     """
     Group signal nodes that are within `radius_m` of each other.
     Returns a list of lists (each inner list = one cluster of node ids).
-    Uses simple greedy agglomerative clustering.
+    Uses union-find for transitive clustering: if A↔B and B↔C, all three
+    join the same cluster even if A and C are > radius_m apart.
     """
     signal_nodes = [
         (nid, inter) for nid, inter in network.intersections.items()
         if inter.is_signal and inter.incoming
     ]
-    assigned = set()
-    clusters = []
+    if not signal_nodes:
+        return []
 
-    for nid, inter in signal_nodes:
-        if nid in assigned:
-            continue
-        cluster = [nid]
-        assigned.add(nid)
-        # Find all unassigned signal nodes within radius
-        for other_nid, other_inter in signal_nodes:
-            if other_nid in assigned:
-                continue
-            d = _haversine(inter.y, inter.x, other_inter.y, other_inter.x)
+    # Union-find
+    parent = {nid: nid for nid, _ in signal_nodes}
+    rank = {nid: 0 for nid, _ in signal_nodes}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]  # path compression
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            ra, rb = rb, ra
+        parent[rb] = ra
+        if rank[ra] == rank[rb]:
+            rank[ra] += 1
+
+    # Merge all pairs within radius
+    for i in range(len(signal_nodes)):
+        for j in range(i + 1, len(signal_nodes)):
+            nid_i, inter_i = signal_nodes[i]
+            nid_j, inter_j = signal_nodes[j]
+            d = _haversine(inter_i.y, inter_i.x, inter_j.y, inter_j.x)
             if d <= radius_m:
-                cluster.append(other_nid)
-                assigned.add(other_nid)
-        clusters.append(cluster)
-    return clusters
+                union(nid_i, nid_j)
+
+    # Group by root
+    clusters_dict: Dict[int, List[int]] = {}
+    for nid, _ in signal_nodes:
+        root = find(nid)
+        clusters_dict.setdefault(root, []).append(nid)
+    return list(clusters_dict.values())
+
+
+EXPAND_SEG_MAX_M = 20.0   # only follow segments shorter than this
+EXPAND_DIST_MAX_M = 40.0  # max total distance from nearest signal node
+
+
+def _expand_cluster(cluster: List[int], network, seg_max=EXPAND_SEG_MAX_M,
+                    dist_max=EXPAND_DIST_MAX_M) -> List[int]:
+    """
+    Expand a signal cluster to include nearby non-signal nodes that are
+    part of the same physical intersection.
+
+    BFS outward from signal nodes along short segments (< seg_max).
+    A non-signal node is absorbed if:
+      - it is reachable within dist_max total distance, AND
+      - it has 3+ connections (a junction node, not mid-road geometry)
+    This prevents chain-expansion along roads with many short segments.
+    """
+    signal_set = set(cluster)
+    expanded = set(cluster)
+    # BFS queue: (node_id, distance_from_nearest_signal)
+    queue = [(nid, 0.0) for nid in cluster]
+    visited = set(cluster)
+
+    while queue:
+        nid, dist = queue.pop(0)
+        inter = network.intersections.get(nid)
+        if inter is None:
+            continue
+
+        # Follow both incoming and outgoing segments
+        neighbors = []
+        for seg in inter.outgoing:
+            if seg.length < seg_max:
+                neighbors.append((seg.v, seg.length))
+        for seg in inter.incoming:
+            if seg.length < seg_max:
+                neighbors.append((seg.u, seg.length))
+
+        for neighbor_nid, seg_len in neighbors:
+            if neighbor_nid in visited:
+                continue
+            new_dist = dist + seg_len
+            if new_dist > dist_max:
+                continue
+            visited.add(neighbor_nid)
+
+            neighbor_inter = network.intersections.get(neighbor_nid)
+            if neighbor_inter is None:
+                continue
+
+            # Count connections (incoming + outgoing unique edges)
+            n_connections = len(neighbor_inter.incoming) + len(neighbor_inter.outgoing)
+
+            # Absorb if it's a junction node (3+ connections) or a signal node
+            if n_connections >= 3 or neighbor_inter.is_signal:
+                expanded.add(neighbor_nid)
+                queue.append((neighbor_nid, new_dist))
+
+    return list(expanded)
 
 
 class TrafficLightManager:
     """Owns all traffic lights in the network.
 
     Nearby signal nodes are clustered into a single TrafficLight controller
-    so they behave as one real-world intersection.
+    so they behave as one real-world intersection.  Clusters are then expanded
+    to include nearby junction nodes connected by short segments, so the
+    controller covers the full physical intersection.
     """
 
     def __init__(self, network):
@@ -185,24 +268,32 @@ class TrafficLightManager:
 
         clusters = _cluster_signal_nodes(network)
 
+        total_signal = sum(len(c) for c in clusters)
+        total_expanded = 0
+
         for cluster in clusters:
-            # Gather all incoming segments for every node in the cluster
+            # Expand cluster to include nearby junction nodes
+            expanded = _expand_cluster(cluster, network)
+            total_expanded += len(expanded) - len(cluster)
+
+            # Gather all incoming segments for every node in the expanded cluster
             all_incoming = []
-            for nid in cluster:
+            for nid in expanded:
                 all_incoming.extend(network.intersections[nid].incoming)
 
             offset = rng.uniform(0, CYCLE_LENGTH)
-            light = TrafficLight(cluster, all_incoming, network, offset)
+            light = TrafficLight(expanded, all_incoming, network, offset)
             self._controllers.append(light)
 
-            # Map every node in the cluster to this shared controller
-            for nid in cluster:
+            # Map every node in the expanded cluster to this shared controller
+            for nid in expanded:
                 self.lights[nid] = light
 
         n_clustered = sum(1 for c in clusters if len(c) > 1)
         print(f"TrafficLightManager: {len(self._controllers)} controllers "
               f"({n_clustered} clusters of 2+ nodes, "
-              f"{len(self.lights)} signal nodes total)")
+              f"{total_signal} signal nodes, "
+              f"{total_expanded} junction nodes absorbed)")
 
     def step(self, dt: float):
         # Only step unique controllers (not duplicates from clustering)
@@ -212,6 +303,10 @@ class TrafficLightManager:
     def is_green(self, node_id: int, incoming_edge_id: Tuple) -> bool:
         light = self.lights.get(node_id)
         if light is None:
+            return True
+        # Intra-cluster segment: never stop inside an intersection
+        source_node = incoming_edge_id[0]
+        if source_node in self.lights and self.lights[source_node] is light:
             return True
         return light.is_green(incoming_edge_id)
 

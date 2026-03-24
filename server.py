@@ -34,7 +34,6 @@ from src.state_serializer import (
 
 # ------------------------------------------------------------------ globals
 _network: RoadNetwork = None
-_network_json: dict = None
 _corridor_name: str = "warren_st"
 _num_vehicles: int = None
 _active_sim_lock = None  # asyncio.Lock, created at startup
@@ -43,11 +42,10 @@ _active_ws = None        # track the single active WebSocket
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _network, _network_json, _num_vehicles
+    global _network, _num_vehicles
     print(f"Loading corridor: {_corridor_name}", flush=True)
     G, signals = load_corridor(_corridor_name, force_download=False)
     _network = RoadNetwork(G, signals)
-    _network_json = serialize_network(_network)
 
     if _num_vehicles is None:
         _num_vehicles = max(50, len(_network.segments) // 3)
@@ -96,8 +94,9 @@ async def simulation_ws(ws: WebSocket):
     target_fps = 10
     frame_interval = 1.0 / target_fps
 
-    # Send static network data
-    await ws.send_json({"type": "network", **_network_json})
+    # Send static network data (needs light_mgr for per-controller indicators)
+    network_json = serialize_network(_network, sim.light_mgr)
+    await ws.send_json({"type": "network", **network_json})
 
     # Send initial frame
     await ws.send_json(serialize_frame(sim))

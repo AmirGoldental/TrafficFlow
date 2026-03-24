@@ -210,10 +210,13 @@ function onNetwork(msg) {
         id: "indicators",
         type: "line",
         source: "indicators",
+        layout: {
+            "line-cap": "round",
+        },
         paint: {
             "line-color": "#f5a623",  // will be updated per frame
-            "line-width": 3,
-            "line-opacity": 0.9,
+            "line-width": 7,
+            "line-opacity": 0.95,
         },
     });
 
@@ -513,11 +516,32 @@ function onInspectResult(msg) {
         content.innerHTML = "";
         appendStatRows(content, [
             ["State", d.state, stateColor],
-            ["Phase", d.current_phase],
+            ["Time remaining", `${d.time_remaining}s`],
+            ["Cycle", `${d.cycle_length}s (${d.green_duration}s green, ${d.yellow_duration}s yellow)`],
             ["Cluster nodes", d.controller_nodes?.length || 1],
-            ["N-S edges", d.phase_0_edges],
-            ["E-W edges", d.phase_1_edges],
-            ["Roads", (d.incoming_roads || []).join(", ") || "\u2014"],
         ]);
+
+        // Phase groups with colored blocks
+        if (d.phase_groups) {
+            for (const pg of d.phase_groups) {
+                const pgColor = pg.state === "green" ? "#00ff88"
+                              : pg.state === "yellow" ? "#ffdd00"
+                              : "#ff3333";
+                const pgDiv = document.createElement("div");
+                pgDiv.style.cssText = "margin-top:8px;padding:6px 8px;background:rgba(255,255,255,0.04);border-radius:4px;border-left:3px solid " + pgColor;
+
+                const header = document.createElement("div");
+                header.style.cssText = "font-size:11px;font-weight:600;margin-bottom:4px;color:" + pgColor;
+                header.textContent = `Phase ${pg.phase} (${pg.label}): ${pg.state.toUpperCase()}`;
+                pgDiv.appendChild(header);
+
+                const roads = document.createElement("div");
+                roads.style.cssText = "font-size:12px;color:#bbb";
+                roads.textContent = pg.roads.join(", ");
+                pgDiv.appendChild(roads);
+
+                content.appendChild(pgDiv);
+            }
+        }
     }
 }

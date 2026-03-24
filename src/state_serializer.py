@@ -70,7 +70,7 @@ def _arrow_polygon(center_lon, center_lat, bearing_rad, length_m, width_m, lane,
     ]
 
 
-def serialize_network(network: "RoadNetwork") -> dict:
+def serialize_network(network: "RoadNetwork", light_mgr=None) -> dict:
     """Static road geometry + signal positions. Sent once on connect."""
     road_features = []
     for seg in network.segments.values():
@@ -99,40 +99,58 @@ def serialize_network(network: "RoadNetwork") -> dict:
                 "properties": {"node_id": nid},
             })
 
-    # Signal directional indicators — short lines on each incoming edge
+    # Signal directional indicators — per controller, positioned at cluster centroid
     indicator_features = []
-    for nid, inter in network.intersections.items():
-        if not inter.is_signal:
-            continue
-        for seg in inter.incoming:
-            u_inter = network.intersections[seg.u]
-            # Short line from approach direction into the intersection
-            dx = inter.x - u_inter.x  # degrees lon
-            dy = inter.y - u_inter.y  # degrees lat
-            # Convert to metres using proper per-axis scaling
-            dx_m = dx * DEG_LON
-            dy_m = dy * DEG_LAT
-            length_m = math.hypot(dx_m, dy_m)
-            if length_m < 1.0:
+    if light_mgr is not None:
+        seen_controllers = set()
+        for ctrl in light_mgr._controllers:
+            ctrl_id = id(ctrl)
+            if ctrl_id in seen_controllers:
                 continue
-            # ~25m indicator
-            frac = min(0.3, 25.0 / length_m)
-            start_lon = inter.x - frac * dx
-            start_lat = inter.y - frac * dy
-            indicator_features.append({
-                "type": "Feature",
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": [
-                        [start_lon, start_lat],
-                        [inter.x, inter.y],
-                    ],
-                },
-                "properties": {
-                    "node_id": nid,
-                    "edge_id": f"{seg.u}-{seg.v}-{seg.edge_id[2]}",
-                },
-            })
+            seen_controllers.add(ctrl_id)
+
+            # Cluster centroid
+            cx = sum(network.intersections[nid].x for nid in ctrl.node_ids) / len(ctrl.node_ids)
+            cy = sum(network.intersections[nid].y for nid in ctrl.node_ids) / len(ctrl.node_ids)
+            cluster_set = set(ctrl.node_ids)
+            representative_nid = ctrl.node_ids[0]
+
+            # Collect unique incoming segments, skipping intra-cluster
+            seen_edges = set()
+            for nid in ctrl.node_ids:
+                inter = network.intersections[nid]
+                for seg in inter.incoming:
+                    if seg.edge_id in seen_edges:
+                        continue
+                    if seg.u in cluster_set:
+                        continue  # intra-cluster segment
+                    seen_edges.add(seg.edge_id)
+
+                    u_inter = network.intersections[seg.u]
+                    dx = cx - u_inter.x
+                    dy = cy - u_inter.y
+                    dx_m = dx * DEG_LON
+                    dy_m = dy * DEG_LAT
+                    length_m = math.hypot(dx_m, dy_m)
+                    if length_m < 1.0:
+                        continue
+                    frac = min(0.3, 25.0 / length_m)
+                    start_lon = cx - frac * dx
+                    start_lat = cy - frac * dy
+                    indicator_features.append({
+                        "type": "Feature",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [
+                                [start_lon, start_lat],
+                                [cx, cy],
+                            ],
+                        },
+                        "properties": {
+                            "node_id": representative_nid,
+                            "edge_id": f"{seg.u}-{seg.v}-{seg.edge_id[2]}",
+                        },
+                    })
 
     return {
         "roads": {"type": "FeatureCollection", "features": road_features},
@@ -188,29 +206,41 @@ def _serialize_vehicles(sim: "Simulation") -> list:
 
 
 def _serialize_signals(sim: "Simulation") -> list:
-    """Compact signal state: list of {node_id, edge_id, green} per indicator."""
+    """Compact signal state: list of {node_id, edge_id, color} per indicator."""
     result = []
-    for nid, inter in sim.network.intersections.items():
-        if not inter.is_signal:
+    seen_controllers = set()
+    for ctrl in sim.light_mgr._controllers:
+        ctrl_id = id(ctrl)
+        if ctrl_id in seen_controllers:
             continue
-        light = sim.light_mgr.lights.get(nid)
-        if light is None:
-            continue
-        for seg in inter.incoming:
-            eid = f"{seg.u}-{seg.v}-{seg.edge_id[2]}"
-            if light.state == "yellow":
-                # Only the phase that was green shows yellow; others stay red
-                edge_phase = light.phase_for_edge(seg.edge_id)
-                color = "yellow" if edge_phase == light.current_phase else "red"
-            elif light.is_green(seg.edge_id):
-                color = "green"
-            else:
-                color = "red"
-            result.append({
-                "node_id": nid,
-                "edge_id": eid,
-                "color": color,
-            })
+        seen_controllers.add(ctrl_id)
+
+        representative_nid = ctrl.node_ids[0]
+        cluster_set = set(ctrl.node_ids)
+        seen_edges = set()
+
+        for nid in ctrl.node_ids:
+            inter = sim.network.intersections[nid]
+            for seg in inter.incoming:
+                if seg.edge_id in seen_edges:
+                    continue
+                if seg.u in cluster_set:
+                    continue  # skip intra-cluster segments
+                seen_edges.add(seg.edge_id)
+
+                eid = f"{seg.u}-{seg.v}-{seg.edge_id[2]}"
+                if ctrl.state == "yellow":
+                    edge_phase = ctrl.phase_for_edge(seg.edge_id)
+                    color = "yellow" if edge_phase == ctrl.current_phase else "red"
+                elif ctrl.is_green(seg.edge_id):
+                    color = "green"
+                else:
+                    color = "red"
+                result.append({
+                    "node_id": representative_nid,
+                    "edge_id": eid,
+                    "color": color,
+                })
     return result
 
 
@@ -235,17 +265,52 @@ def serialize_vehicle_detail(sim: "Simulation", vid: int) -> dict:
 
 def serialize_signal_detail(sim: "Simulation", node_id: int) -> dict:
     """Detailed info about a specific traffic signal."""
+    from .traffic_light import GREEN_DURATION, YELLOW_DURATION, CYCLE_LENGTH
+
     light = sim.light_mgr.lights.get(node_id)
     if light is None:
         return {"error": f"Signal {node_id} not found"}
     inter = sim.network.intersections.get(node_id)
+
+    # Build phase group info with road names and current state
+    phase_groups = []
+    for phase_idx, edge_set in enumerate(light._phase_segs):
+        roads = set()
+        for edge_id in edge_set:
+            seg = sim.network.segments.get(edge_id)
+            if seg and seg.name:
+                roads.add(seg.name)
+
+        if light.state == "yellow":
+            phase_state = "yellow" if phase_idx == light.current_phase else "red"
+        elif phase_idx == light.current_phase:
+            phase_state = "green"
+        else:
+            phase_state = "red"
+
+        phase_label = "N-S" if phase_idx == 0 else "E-W"
+        phase_groups.append({
+            "phase": phase_idx,
+            "label": phase_label,
+            "state": phase_state,
+            "roads": sorted(roads) if roads else ["(unnamed)"],
+        })
+
+    if light.state == "green":
+        time_remaining = round(GREEN_DURATION - light._elapsed, 1)
+    else:
+        time_remaining = round(YELLOW_DURATION - light._elapsed, 1)
+
     return {
         "node_id": node_id,
         "controller_nodes": light.node_ids,
         "current_phase": light.current_phase,
         "state": light.state,
-        "phase_0_edges": len(light._phase_segs[0]),
-        "phase_1_edges": len(light._phase_segs[1]),
+        "phase_groups": phase_groups,
+        "green_duration": GREEN_DURATION,
+        "yellow_duration": YELLOW_DURATION,
+        "cycle_length": CYCLE_LENGTH,
+        "time_remaining": max(0, time_remaining),
         "incoming_roads": list({
             s.name for s in inter.incoming if s.name
         }) if inter else [],
