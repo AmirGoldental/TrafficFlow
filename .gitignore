@@ -208,6 +208,10 @@ __marimo__/
 
 # TrafficFlow project-specific
 cache/
-data/
 *.gif
 .claude/
+
+# Data directory: ignore large/generated files, keep essential corridor data
+data/*
+!data/graph_bbox_42.3320_42.3070_-71.0740_-71.0920.pkl
+!data/boston_signals.geojson
