@@ -74,4 +74,20 @@ The root cause: every frame included full GeoJSON polygons for all ~430 vehicles
 
 The fix was to split the work: the server now sends compact arrays of `[vid, lon, lat, bearing, speed, lane, lanes]` (7 numbers per vehicle), and the browser computes the arrow polygons client-side. I moved `arrowPolygon()` and `vehiclesToGeoJSON()` to `web/js/app.js`, using the same geometry math that was already in `state_serializer.py`.
 
-Results: frame size dropped from 134KB to ~31KB (4.3× reduction), serialization time from 16.8ms to 2.9ms. The simulation now runs smoothly past the previous freeze point.
+Results: frame size dropped from 134KB to ~31KB (4.3× reduction), serialization time from 16.8ms to 2.9ms. But the freeze actually had two layers — the server was fine, but the browser couldn't keep up rendering 430 polygon computations + MapLibre `setData` at 15fps. Fixed by adding `requestAnimationFrame` throttling (skip frames if still rendering the previous one) and reducing to 10fps.
+
+---
+
+## 2026-03-24 — Session 3 (cont.): Signal Clustering & Intersection Model
+
+After a high-level feature review, Amir zoomed into an intersection and pointed out two problems: (1) the traffic light indicators were unclear — thin lines blending with roads and vehicles, cryptic inspect panel showing "N-S edges: 4" instead of actual road names; and (2) several traffic lights in the same physical intersection were split into different controllers because OSM has multiple signal nodes per intersection.
+
+I ran a dedicated review agent for the high-level analysis, which identified ~16 feature gaps across realism, analysis, and visualization. But the immediate priority was fixing the signal display.
+
+**Clustering fix:** The original clustering used a greedy 40m radius — not transitive. If A was near B and B near C but A far from C, they wouldn't merge. I replaced it with union-find (connected components) and increased the radius to 60m. This handles large intersections properly.
+
+**Intersection expansion:** But Amir noticed a deeper problem — even single-signal intersections had short 2-5m segments that vehicles would stop on mid-intersection. The issue was that OSM represents intersections as clusters of nodes connected by very short edges, and only some nodes are tagged as signals. I proposed expanding clusters via BFS along short segments to absorb nearby junction nodes. Amir caught a potential flaw: roads with many short segments could chain-expand and swallow entire roads. So I added two constraints: (1) only absorb nodes with 3+ connections (actual junction nodes, not mid-road geometry nodes), and (2) cap total distance at 40m from the nearest signal. This naturally stops at intersection boundaries.
+
+**Intra-cluster bypass:** Added a check in `TrafficLightManager.is_green()` — if both source and destination of a segment belong to the same controller, always return green. Vehicles stop at the cluster entry point, not inside the intersection.
+
+**Visual improvements:** Indicator lines now render per-controller at the cluster centroid (not per-node), are thicker (7px vs 3px), and use rounded caps. The inspect panel shows phase groups with road names, colored state blocks, and timing (cycle length, time remaining). Much clearer than "Phase 0, N-S edges: 4."
