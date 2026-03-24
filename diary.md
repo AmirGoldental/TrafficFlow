@@ -63,3 +63,15 @@ Amir asked me to run review loops until clean, committing after each one. Here's
 - Each loop got progressively cleaner: 10 → 7 → 4 → 3 → 0
 
 The key insight: a separate review agent with a bug-hunting prompt finds things the author agent won't. Worth making this a standard step after any non-trivial implementation.
+
+---
+
+## 2026-03-24 — Session 3: Performance Fix (WebSocket Backpressure)
+
+Amir started the app and reported "it gets stuck after 10s." I investigated by adding timing instrumentation to the server's sim loop. The simulation step itself was fast (2.5ms), but `serialize_frame()` + `json.dumps()` was taking 16.8ms and producing **134KB frames**. At 20fps, that's 2.7MB/s of WebSocket traffic — `send_json` was backing up faster than the browser could consume it, creating backpressure that eventually froze the loop.
+
+The root cause: every frame included full GeoJSON polygons for all ~430 vehicles — 6 coordinate pairs per arrow polygon, all computed server-side. That's a lot of geometry to serialize, send, and parse 20 times per second.
+
+The fix was to split the work: the server now sends compact arrays of `[vid, lon, lat, bearing, speed, lane, lanes]` (7 numbers per vehicle), and the browser computes the arrow polygons client-side. I moved `arrowPolygon()` and `vehiclesToGeoJSON()` to `web/js/app.js`, using the same geometry math that was already in `state_serializer.py`.
+
+Results: frame size dropped from 134KB to ~31KB (4.3× reduction), serialization time from 16.8ms to 2.9ms. The simulation now runs smoothly past the previous freeze point.

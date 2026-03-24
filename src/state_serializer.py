@@ -159,8 +159,9 @@ def serialize_frame(sim: "Simulation") -> dict:
     }
 
 
-def _serialize_vehicles(sim: "Simulation") -> dict:
-    features = []
+def _serialize_vehicles(sim: "Simulation") -> list:
+    """Compact vehicle list: [vid, lon, lat, bearing, speed, lane, lanes] per vehicle."""
+    result = []
     for v in sim.vehicles.values():
         if not v.active:
             continue
@@ -172,29 +173,18 @@ def _serialize_vehicles(sim: "Simulation") -> dict:
         t = min(v.pos / max(seg.length, 1.0), 1.0)
         lon = u.x + t * (vi.x - u.x)
         lat = u.y + t * (vi.y - u.y)
-
-        # Bearing from u to v (radians, 0=east, pi/2=north)
         bearing = math.atan2(vi.y - u.y, vi.x - u.x)
 
-        poly = _arrow_polygon(
-            lon, lat, bearing,
-            VEHICLE_LENGTH, VEHICLE_WIDTH,
-            v.lane, seg.lanes,
-        )
-
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "Polygon",
-                "coordinates": [poly],
-            },
-            "properties": {
-                "vid": v.vid,
-                "speed": round(v.speed, 2),
-                "speed_kmh": round(v.speed * 3.6, 1),
-            },
-        })
-    return {"type": "FeatureCollection", "features": features}
+        result.append([
+            v.vid,
+            round(lon, 6),
+            round(lat, 6),
+            round(bearing, 3),
+            round(v.speed, 2),
+            v.lane,
+            seg.lanes,
+        ])
+    return result
 
 
 def _serialize_signals(sim: "Simulation") -> list:

@@ -17,6 +17,58 @@ let signalColorMap = {};
 // Keep our own copy of indicator GeoJSON (avoid accessing MapLibre internals)
 let indicatorGeoJSON = null;
 
+// ------------------------------------------------------------------ arrow polygon (client-side)
+const VEHICLE_LENGTH = 7.0;
+const VEHICLE_WIDTH = 2.0;
+const LANE_WIDTH = 3.5;
+const DEG_LAT = 111320.0;
+const DEG_LON = 111320.0 * Math.cos(42.32 * Math.PI / 180);
+
+function arrowPolygon(lon, lat, bearing, lane, numLanes) {
+    const halfL = VEHICLE_LENGTH / 2;
+    const halfW = VEHICLE_WIDTH / 2;
+    const nose = VEHICLE_LENGTH * 0.3;
+
+    const dx = Math.cos(bearing);
+    const dy = Math.sin(bearing);
+    const px = -dy;
+    const py = dx;
+
+    const laneOffset = (lane - (numLanes - 1) / 2) * LANE_WIDTH;
+    const cx = lon + (laneOffset * px) / DEG_LON;
+    const cy = lat + (laneOffset * py) / DEG_LAT;
+
+    function pt(along, perp) {
+        return [
+            cx + (along * dx + perp * px) / DEG_LON,
+            cy + (along * dy + perp * py) / DEG_LAT,
+        ];
+    }
+
+    return [
+        pt(-halfL, -halfW),
+        pt(-halfL, halfW),
+        pt(halfL - nose, halfW),
+        pt(halfL + nose, 0),
+        pt(halfL - nose, -halfW),
+        pt(-halfL, -halfW),
+    ];
+}
+
+function vehiclesToGeoJSON(vehicles) {
+    const features = [];
+    for (const v of vehicles) {
+        const [vid, lon, lat, bearing, speed, lane, lanes] = v;
+        const poly = arrowPolygon(lon, lat, bearing, lane, lanes);
+        features.push({
+            type: "Feature",
+            geometry: { type: "Polygon", coordinates: [poly] },
+            properties: { vid, speed, speed_kmh: Math.round(speed * 3.6 * 10) / 10 },
+        });
+    }
+    return { type: "FeatureCollection", features };
+}
+
 // ------------------------------------------------------------------ init
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -216,10 +268,10 @@ function onNetwork(msg) {
 function onFrame(msg) {
     if (!networkLoaded) return;
 
-    // Update vehicle positions
+    // Build GeoJSON from compact vehicle array and update
     const vehicleSrc = map.getSource("vehicles");
-    if (vehicleSrc) {
-        vehicleSrc.setData(msg.vehicles);
+    if (vehicleSrc && msg.vehicles) {
+        vehicleSrc.setData(vehiclesToGeoJSON(msg.vehicles));
     }
 
     // Update signal indicator colours

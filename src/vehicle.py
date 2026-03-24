@@ -99,7 +99,9 @@ class Vehicle:
         self.distance_total += dx
 
         # Advance to next segment(s) if past the end — loop handles very short segments
-        while self.pos >= seg.length:
+        max_transitions = 10  # safety limit
+        while self.pos >= seg.length and max_transitions > 0:
+            max_transitions -= 1
             overflow = self.pos - seg.length
             try:
                 seg.vehicles.remove(self.vid)
